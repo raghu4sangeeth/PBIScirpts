@@ -124,11 +124,11 @@ function Get_ReportUsers {
        
     if ([string]::IsNullOrWhitespace($workspaceName)) {
         #Retrieve all the workspaces as an admin
-        $Workspaces = Get-PowerBIWorkspace -Scope Organization
+        $Workspaces = Get-PowerBIWorkspace -Scope Organization -All
     }
     else {
         #Retrieve the workspaces with the given workspace name
-        $Workspaces[0] = Get-PowerBIWorkspace  -Name $workspaceName
+        $Workspaces = @( Get-PowerBIWorkspace  -Name $workspaceName -Scope Organization )
     }
 
 
