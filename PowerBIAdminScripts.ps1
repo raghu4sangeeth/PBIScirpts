@@ -35,7 +35,43 @@ function Get-ErrorInformation {
     }
 
 }
+#####################################################
+#           Download AuditLogs                      #
+#####################################################
+function Download_AuditLogs {
+    [cmdletbinding()]
+    param($numberOfDays)
+    
+    # #Connect to PBI Service Account
+    # $userProfile = Connect-PowerBIServiceAccount –Environment Public 	
 
+     if ([string]::IsNullOrWhitespace($numberOfDays)) {
+        exit
+    }
+
+    # Build the outputpath.
+    #Use seperate post fix to add to all the exports using current date 
+    $CurrentDate = Get-Date –Format "yyyyMMdd" 
+    $folder = Read-Host -Prompt 'Input the folder name to save the logs(eg: C:\Out)'
+    $outPutPath = $folder + "\" + $CurrentDate 
+
+     #If the folder doens't exists, it will be created.
+     If (!(Test-Path $outPutPath)) {
+        New-Item –ItemType Directory –Force –Path $outPutPath
+    }
+    
+     # Number of days is 30 max for activity logs
+
+    $numberOfDays..1 |
+    foreach {
+        $Date = (((Get-Date).Date).AddDays(-$_))
+        $StartDate = (Get-Date -Date ($Date) -Format yyyy-MM-ddTHH:mm:ss)
+        $EndDate = (Get-Date -Date ((($Date).AddDays(1)).AddMilliseconds(-1)) -Format yyyy-MM-ddTHH:mm:ss)
+        
+        Get-PowerBIActivityEvent -StartDateTime $StartDate -EndDateTime $EndDate -ResultType JsonString | 
+        Out-File -FilePath "$OutPutPath\PowerBI_AudititLog_$(Get-Date -Date $Date -Format yyyyMMdd).json"
+    }
+}
 #####################################################
 #           Download PBIX reports                   #
 #####################################################
