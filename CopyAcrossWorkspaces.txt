@@ -1,0 +1,315 @@
+﻿<#
+
+. This code works if:
+        1. The pbix files are loaded to the workspace from PB Desktop
+        2. The reports copied from one workspace-1/tenant-1 to another workspace-2/tenant-2
+        3. Run this script as an administrator
+        4. You will be prompted to log into tenant-1 as admin to copy pbix files from workspace-1 to your local drive
+        5. You will be prompted to log into tenant-2 as admin to upload the pbix files to workspace-2
+        6. The local drive folder is: $temp_path_root
+        7. The workspace-1 is: User will be prompted to enter, this is on Tenant-1
+        8. The workspace-2 is: User will be prompted to enter, this is on Tenant-2
+.Synopsis
+
+    Copies the pbix(reports) of a Power BI workspace to another Power BI workspace in a different tenant
+
+.Description
+
+    Copies the contents of a Power BI workspace to another Power BI workspacenin another tenant
+
+    This script uses the Power BI Management module for Windows PowerShell. If this module isn't installed, install it by using the command 'Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser'.
+
+.Parameter SourceWorkspaceName
+
+    The name of the workspace you'd like to copy the contents from.
+
+.Parameter TargetWorkspaceName
+
+    The name of the workspace you'd like to copy to. You must have edit access to the specified workspace.
+
+.Parameter CreateTargetWorkspaceIfNotExists
+
+    A flag to indicate if the script should create the target workspace if it doesn't exist. The default is to create the target workspace.
+#>
+
+
+
+[CmdletBinding()]
+
+param
+
+(
+
+    [string] $SourceWorkspaceName,
+    [string] $CreateTargetWorkspaceIfNotExists = $true
+
+
+)
+
+
+
+#region Helper Functions 
+
+
+
+function Assert-ModuleExists([string]$ModuleName) {
+
+    $module = Get-Module $ModuleName -ListAvailable -ErrorAction SilentlyContinue
+
+    if (!$module) {
+
+        Write-Host "Installing module $ModuleName ..."
+
+        Install-Module -Name $ModuleName -Force -Scope CurrentUser
+
+        Write-Host "Module installed"
+
+    }
+
+    elseif ($module.Version -ne '1.0.0' -and $module.Version -le '1.0.410') {
+
+        Write-Host "Updating module $ModuleName ..."
+
+        Update-Module -Name $ModuleName -Force -ErrorAction Stop
+
+        Write-Host "Module updated"
+
+    }
+
+}
+
+
+
+#endregion
+
+
+
+# ==================================================================
+
+# PART 1: Verify that the Power BI Management module is installed
+
+#         and authenticate the current user.
+
+# ==================================================================
+
+Assert-ModuleExists -ModuleName "MicrosoftPowerBIMgmt"
+
+Login-PowerBI
+
+
+
+
+# ==================================================================
+
+# PART 2: Getting source and target workspace
+
+# ==================================================================
+
+# STEP 2.1: Get the source workspace
+
+$source_workspace_ID = ""
+
+while (!$source_workspace_ID) {
+
+    $source_workspace_name = if (-not($SourceWorkspaceName)) {
+
+        Read-Host -Prompt "Enter the name of the workspace you'd like to copy from" 
+
+    }
+
+    else {
+
+        $SourceWorkspaceName 
+
+    }
+
+
+
+    if ($source_workspace_name -eq "My Workspace") {
+
+        $source_workspace_ID = "me"
+
+        break
+
+    }
+
+
+
+    $workspace = Get-PowerBIWorkspace -Name $source_workspace_name -ErrorAction SilentlyContinue
+
+
+
+    if (!$workspace) {
+
+        Write-Warning "Could not get a workspace with that name. Please try again, making sure to type the exact name of the workspace"  
+
+    }
+
+    else {
+
+        $source_workspace_ID = $workspace.id
+
+    }
+
+}
+
+
+
+
+# ==================================================================
+
+# PART 3: Copying reports and datasets via Export/Import of 
+
+#         reports built on PBIXes (this step creates the datasets)
+
+# ==================================================================
+
+$report_ID_mapping = @{ }      # mapping of old report ID to new report ID
+
+$dataset_ID_mapping = @{ }     # mapping of old model ID to new model ID
+
+
+
+# STEP 3.1: Create a temporary folder to export the PBIX files.
+
+$temp_path_root = "$PSScriptRoot\pbi-copy-workspace-temp-storage"
+
+$temp_dir = New-Item -Path $temp_path_root -ItemType Directory -ErrorAction SilentlyContinue
+
+
+
+# STEP 3.2: Get the reports from the source workspace
+
+$reports = if ($source_workspace_ID -eq "me") { Get-PowerBIReport } else { Get-PowerBIReport -WorkspaceId $source_workspace_ID }
+
+$reports
+
+
+
+# STEP 3.3: Export the PBIX files from the source and then import them into the target workspace
+
+Foreach ($report in $reports) {
+
+   
+    $report_id = [guid]$report.Id
+
+    $dataset_id = [guid]$report.DatasetId
+
+    $report_name = $report.Name
+
+    $temp_path = "$temp_path_root\$report_name.pbix"
+
+
+
+
+    Write-Host "== Exporting $report_name to $temp_path"
+
+    try {
+
+       
+        Export-PowerBIReport -WorkspaceId $source_workspace_ID -Id $report_id -OutFile "$temp_path" -ErrorAction Stop 
+        
+
+    }
+
+    catch {
+
+        Write-Warning "= This report and dataset cannot be copied, skipping. This is expected for most workspaces."
+
+        continue
+
+    }
+
+}
+# Log out of tenant-1
+Logout-PowerBI
+
+# ==================================================================
+
+# PART 4: Now Log into the Target Power BI Tenant-2
+#         Copy the pbix files from the local derive to workspace-2 on tenant-2
+
+# ==================================================================
+
+
+
+Login-PowerBI 
+
+
+
+
+$temp_path_root = "$PSScriptRoot\pbi-copy-workspace-temp-storage"
+$reports = Get-ChildItem $temp_path_root
+
+#$Target_Workspace_Name ="CopyOfPowerShellTest-10"
+
+$Target_Workspace_Name = Read-Host -Prompt "Enter the name of the workspace you'd like to copy to on tenant-2" 
+
+$target_workspace = Get-PowerBIWorkspace -Name $target_workspace_name -ErrorAction SilentlyContinue
+
+
+
+    if (!$target_workspace -and $CreateTargetWorkspaceIfNotExists -eq $true) {
+
+        $target_workspace = New-PowerBIWorkspace -Name $target_workspace_name -ErrorAction SilentlyContinue
+
+    }
+
+$target_workspace_ID =  $target_workspace.id
+
+$report_ID_mapping = @{ }      # mapping of old report ID to new report ID
+
+$dataset_ID_mapping = @{ }     # mapping of old model ID to new model ID
+
+
+Foreach ($report in $reports) {
+
+   #$report
+
+
+    $report_name = $report.name
+
+    $temp_path = "$temp_path_root\$report_name"
+
+    try {
+
+        Write-Host "== Importing $report_name to target workspace"
+
+
+        $new_report = New-PowerBIReport -Path $temp_path -Name $report_name -WorkspaceId $target_workspace_ID -ConflictAction Abort
+                      
+
+        #$new_report = New-PowerBIReport -Path $temp_path -Name $report_name -Workspace ( Get-PowerBIWorkspace -Name $target_workspace_name ) -ConflictAction Abort -Timeout 1200
+        
+
+        # Get the report again because the dataset id is not immediately available with New-PowerBIReport
+
+        $new_report = Get-PowerBIReport -Workspace ( Get-PowerBIWorkspace -Name $target_workspace_name ) -Id $new_report.id
+
+        if ($new_report) {
+
+            # keep track of the report and dataset IDs
+
+            $report_id_mapping[$report_id] = $new_report.id
+
+            $dataset_id_mapping[$dataset_id] = $new_report.datasetId
+
+        }
+
+    }
+
+    catch [Exception] {
+
+        Write-Error "== Error: failed to import PBIX"
+
+
+
+        $exception = Resolve-PowerBIError -Last
+
+        Write-Error "Error Description:" $exception.Message
+
+        continue
+
+    }
+
+}

@@ -1,0 +1,47 @@
+
+$workspaces = Import-Csv -Path D:\WorkSpaces.csv -Delimiter ","
+$WorkspaceIDs = [System.Collections.ArrayList]::new()
+$targetCapacityObjectId = "AB7B837E-6589-4568-9B70-7B0C28ABAE3C"
+$url = "admin/capacities/AssignWorkspaces"
+
+$workspaces | ForEach-Object { 
+    $WorkspaceID = $_.Id 
+    [void]$WorkspaceIDs.Add($WorkspaceID)
+}
+
+$WorkspaceIDs
+
+$counter = 1
+$body = ""
+
+$WorkspaceIDs | ForEach-Object {
+    if ($counter -eq 1) {
+        $body = '{ 
+            "capacityMigrationAssignments": [{
+            "targetCapacityObjectId":"' + $targetCapacityObjectId + '",
+            "workspacesToAssign": [ "' + $_ + '"'
+    }
+    else {
+        $body += ",`"$_`""
+    }
+    if ($counter -eq 10) {
+        $body += ']
+            }]
+        }'
+        #$body
+        $counter = 1
+    }
+    else {
+        $counter += 1
+    }
+} 
+$body += ']
+            }]
+            }'
+
+Write-Host $url
+Write-Host $body
+
+Connect-PowerBIServiceAccount
+$re = Invoke-PowerBIRestMethod -Url $Url -Method Post -Body $body
+$re
