@@ -1,0 +1,31 @@
+﻿# Declare Variables
+$outPath = "D:\Power BI\Activity Logs\"
+
+# Gets Previous X Days Events – Max Value 89
+$offsetDays = 35
+ 
+############### SCRIPT BEGINS ###############
+Connect-PowerBIServiceAccount -Credential (Get-Credential)
+ 
+# Erorr Handling: outPath - Final character is forward slash and folder exists
+if ($outPath.Substring($outPath.Length - 1, 1) -cne "\") { $outPath = $outPath + "\" } 
+if (!(Test-Path $outPath)) { New-Item -ItemType Directory -Force -Path $outPath }
+ 
+# Iterates Offset Date Range
+For ($i = 1; $i -le $offsetDays; $i+=1) { 
+    $startEvent = ((Get-Date).AddDays(-$i).ToString("yyyy-MM-ddT00:00:00"))
+    $endEvent = ((Get-Date).AddDays(-$i).ToString("yyyy-MM-ddT23:59:59"))
+	Write-Host "***** $($startEvent.Substring(0,10)) --- $($endEvent.Substring(0,10))****"
+	$results = Get-PowerBIActivityEvent -StartDateTime $startEvent -EndDateTime $endEvent | ConvertFrom-Json
+    if ($results.Count -gt 0) {
+                $results | Export-Csv -Path "$($outpath)Power_BI_Activity_Logs.csv" -NoTypeInformation -Force -Append
+                Write-Host "$($results.Count) appended"
+            }
+    else { continue }
+    
+	}
+ 
+Disconnect-PowerBIServiceAccount
+ 
+
+exit
