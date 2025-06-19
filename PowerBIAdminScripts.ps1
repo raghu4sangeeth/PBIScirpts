@@ -10,7 +10,7 @@ function Get-ErrorInformation {
     if ($incomingError -and (($incomingError | Get-Member | Select-Object -ExpandProperty TypeName -Unique) -eq 'System.Management.Automation.ErrorRecord')) {
 
         Write-Host `n"Error information:"`n
-        Write-Host `t"Exception type for catch: [$($IncomingError.Exception | Get-Member | Select-Object -ExpandProperty TypeName -Unique)]"`n 
+        Write-Host `t"Exception type for catch: [$($incomingError.Exception | Get-Member | Select-Object -ExpandProperty TypeName -Unique)]"`n 
 
         if ($incomingError.InvocationInfo.Line) {
         
@@ -28,7 +28,7 @@ function Get-ErrorInformation {
 
     }
 
-    Else {
+    else {
 
         Write-Host "Please include a valid error record when using this function!" -ForegroundColor Red -BackgroundColor DarkBlue
 
@@ -43,91 +43,200 @@ function Download_AuditLogs {
     param($numberOfDays)
     
     # #Connect to PBI Service Account
-    # $userProfile = Connect-PowerBIServiceAccount –Environment Public 	
+    # $userProfile = Connect-PowerBIServiceAccount -Environment Public 	
 
-     if ([string]::IsNullOrWhitespace($numberOfDays)) {
-        exit
+    if ([string]::IsNullOrWhitespace($numberOfDays)) {
+        return
     }
 
     # Build the outputpath.
     #Use seperate post fix to add to all the exports using current date 
-    $CurrentDate = Get-Date –Format "yyyyMMdd" 
+    $CurrentDate = Get-Date -Format "yyyyMMdd" 
     $folder = Read-Host -Prompt 'Input the folder name to save the logs(eg: C:\Out)'
     $outPutPath = $folder + "\" + $CurrentDate 
 
-     #If the folder doens't exists, it will be created.
-     If (!(Test-Path $outPutPath)) {
-        New-Item –ItemType Directory –Force –Path $outPutPath
+    #If the folder doens't exists, it will be created.
+    if (!(Test-Path $outPutPath)) {
+        New-Item -ItemType Directory -Force -Path $outPutPath
     }
     
-     # Number of days is 30 max for activity logs
+    # Number of days is 30 max for activity logs
 
     $numberOfDays..1 |
-    foreach {
+    ForEach-Object {
         $Date = (((Get-Date).Date).AddDays(-$_))
         $StartDate = (Get-Date -Date ($Date) -Format yyyy-MM-ddTHH:mm:ss)
         $EndDate = (Get-Date -Date ((($Date).AddDays(1)).AddMilliseconds(-1)) -Format yyyy-MM-ddTHH:mm:ss)
         
         Get-PowerBIActivityEvent -StartDateTime $StartDate -EndDateTime $EndDate -ResultType JsonString | 
-        Out-File -FilePath "$OutPutPath\PowerBI_AudititLog_$(Get-Date -Date $Date -Format yyyyMMdd).json"
+        Out-File -FilePath "$OutPutPath\PowerBI_AuditLog_$(Get-Date -Date $Date -Format yyyyMMdd).json"
     }
 }
 #####################################################
 #           Download PBIX reports                   #
 #####################################################
+function Grant-AdminAccessToWorkspace {
+    [cmdletbinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ApiHostUri
+    )
+
+    # Get access token header
+    $headers = Get-PowerBIAccessToken
+
+    # Add required headers
+    $headers["Referer"] = "https://app.powerbi.com"
+    $headers["Origin"] = "https://app.powerbi.com"
+    $headers["X-PowerBI-HostEnv"] = "Power BI Web App"
+    $headers["X-PowerBI-User-Admin"] = "True"
+
+    # Construct API URI
+    $uri = "$ApiHostUri/metadata/admin/workspaces/$WorkspaceId/adminAccess"
+
+    # Make PUT request
+    Invoke-RestMethod -Uri $uri -Headers $headers -Method Put
+
+    Write-Host "Admin access granted to workspace ID $WorkspaceId"
+}
+
+function Get-PowerBIReportWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceId,
+        [int]$MaxRetries = 30,
+        [int]$RetryDelaySeconds = 3600
+    )
+    $retryCount = 0
+    while ($retryCount -lt $MaxRetries) {
+        try {
+            return Get-PowerBIReport -WorkspaceId $WorkspaceId -Scope Organization
+        }
+        catch {
+            if ($_.Exception.Response.StatusCode.value__ -eq 429) {
+                Write-Host "Received HTTP 429 (Too Many Requests). Sleeping for 1 hour before retrying..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $RetryDelaySeconds
+                $retryCount++
+            }
+            else {
+                throw $_
+            }
+        }
+    }
+    Write-Host "Failed to retrieve reports for workspace $WorkspaceId after $MaxRetries retries." -ForegroundColor Red
+    return $null
+}
+
+function Export-PowerBIReportWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceId,
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [int]$MaxRetries = 30,
+        [int]$RetryDelaySeconds = 3600
+    )
+    $retryCount = 0
+    while ($retryCount -lt $MaxRetries) {
+        try {
+            Export-PowerBIReport -WorkspaceId $WorkspaceId -Id $ReportId -OutFile $OutFile
+            return
+        }
+        catch {
+            if ($_.Exception.Response.StatusCode.value__ -eq 429) {
+                Write-Host "Received HTTP 429 (Too Many Requests) during export. Sleeping for 1 hour before retrying..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $RetryDelaySeconds
+                $retryCount++
+            }
+            else {
+                throw $_
+            }
+        }
+    }
+    Write-Host "Failed to export report $ReportId after $MaxRetries retries." -ForegroundColor Red
+}
+
+<#
++     .SYNOPSIS
++     Downloads PBIX reports from Power BI workspaces.
++ 
++     .PARAMETER workspaceName
++     Name of the workspace to download reports from. If not specified, all workspaces are processed.
++ 
++     .PARAMETER ApiHostUri
++     The Power BI API host URI for your region (e.g., https://wabi-west-us3-a-primary-redirect.analysis.windows.net/).
++     This is required for granting admin access to personal workspaces. Ensure you use the correct URI for your tenant's region!
++     #>
 function Download_PBIXReports {
     [cmdletbinding()]
-    param($workspaceName)
+    param(
+        [string] $WorkspaceName,
+        [string] $ApiHostUri = "https://wabi-west-us3-a-primary-redirect.analysis.windows.net/")
     
-    # #Connect to PBI Service Account
-    # $userProfile = Connect-PowerBIServiceAccount –Environment Public 	
-    
+    # Validate the userProfile
+    if (-not $userProfile) {
+        Write-Host "You are not connected to Power BI Service. Connecting now." -ForegroundColor Yellow
+        $userProfile = Connect-PowerBIServiceAccount -Environment Public
+    }
        
-    if ([string]::IsNullOrWhitespace($workspaceName)) {
+    if ([string]::IsNullOrWhitespace($WorkspaceName)) {
         #Retrieve all the workspaces as an admin
         $Workspaces = Get-PowerBIWorkspace -Scope Organization -All
         $tenantLevel = $true
     }
     else {
         #Retrieve the workspaces with the given workspace name
-        $Workspaces = @( Get-PowerBIWorkspace  -Name $workspaceName -Scope Organization )
+        $Workspaces = @( Get-PowerBIWorkspace -Name $WorkspaceName -Scope Organization )
     }
 
 
     #Use seperate post fix to add to all the exports using current date 
-    $CurrentDate = Get-Date –Format "yyyyMMdd" 
+    $CurrentDate = Get-Date -Format "yyyyMMdd" 
 
     # Build the outputpath.
     $folder = Read-Host -Prompt 'Input the folder name to save the reports(eg: C:\Out)'
     $OutPutPath = $folder + "\" + $CurrentDate 
 
     #Now loop through the workspaces, hence the ForEach
-    ForEach ($Workspace in $Workspaces) {
-            
+    foreach ($Workspace in $Workspaces) {
         #only keep alphabets in the file / folder names
         $pattern = '\W'
         $folderName = $Workspace.name -replace $pattern
             
         #create the required rights to download 
         if ($tenantLevel) {
-            # for now we are not checking if the user is already a member nor we are not removing the user once added. 
-            Add-PowerBIWorkspaceUser -Scope Organization -Id $Workspace.Id -UserEmailAddress $userProfile.UserName -AccessRight Admin
+            if ($Workspace.Type -eq "PersonalGroup" -and $Workspace.Name -ne "My Workspace") {
+                #Grant admin access to the personal workspace if the user is not already an admin - This is unsupported way!!
+                #ensure you replace the ApiHostUri with the correct one for your region
+                Grant-AdminAccessToWorkspace -WorkspaceId $Workspace.Id -ApiHostUri $ApiHostUri
+            }
+            else {
+                #Write-Host "The workspace: " $Workspace.name " is read-only. Skipping admin access." -ForegroundColor Yellow
+                # for now we are not checking if the user is already a member nor we are not removing the user once added. 
+                Add-PowerBIWorkspaceUser -Scope Organization -Id $Workspace.Id -UserEmailAddress $userProfile.UserName -AccessRight Admin
+            }
         }
             
         #For all workspaces there is a new Folder destination: Outputpath + Workspacename
         $Folder = $OutPutPath + "\" + $folderName 
+        
         #If the folder doens't exists, it will be created.
-        If (!(Test-Path $Folder)) {
-            New-Item –ItemType Directory –Force –Path $Folder
+        if (!(Test-Path $Folder)) {
+            New-Item -ItemType Directory -Force -Path $Folder
         }
+        
         #At this point, there is a folder structure with a folder for all your workspaces 
-	
-	
+        $downloaded = $false
         #Collect all (or one) of the reports from one or all workspaces 
-        $PBIReports = Get-PowerBIReport –WorkspaceId $Workspace.Id -Scope Organization 						 
+        $PBIReports = Get-PowerBIReportWithRetry -WorkspaceId $Workspace.Id
 
         #Now loop through these reports: 
-        ForEach ($Report in $PBIReports) {
+        foreach ($Report in $PBIReports) {
             $fileName = $Report.name -replace $pattern
 
             #Your PowerShell comandline will say Downloading Workspacename Reportname
@@ -142,7 +251,20 @@ function Download_PBIXReports {
             }
 			
             #The pbix is now really getting downloaded
-            Export-PowerBIReport –WorkspaceId $Workspace.ID –Id $Report.ID –OutFile $OutputFile
+            Export-PowerBIReportWithRetry -WorkspaceId $Workspace.Id -Id $Report.Id -OutFile $OutputFile
+
+            if (Test-Path $OutputFile) {
+                Write-Host "Successfully downloaded." -ForegroundColor Green
+                $downloaded = $true
+            }
+            else {
+                Write-Host "Failed to download the report: " $Report.name " from workspace: " $Workspace.name -ForegroundColor Red
+            }
+        }
+        
+        # If no reports were downloaded, rename the folder to indicate no reports were found
+        if (!$downloaded) {
+            Rename-Item -Path $Folder -NewName ("_" + $folderName)
         }
     }
 }
@@ -155,7 +277,7 @@ function Get_ReportUsers {
     param($workspaceName)
     
     #Connect to PBI Service Account
-    #$userProfile = Connect-PowerBIServiceAccount –Environment Public 	
+    #$userProfile = Connect-PowerBIServiceAccount -Environment Public 	
     
        
     if ([string]::IsNullOrWhitespace($workspaceName)) {
@@ -164,49 +286,33 @@ function Get_ReportUsers {
     }
     else {
         #Retrieve the workspaces with the given workspace name
-        $Workspaces = @( Get-PowerBIWorkspace  -Name $workspaceName -Scope Organization )
+        $Workspaces = @( Get-PowerBIWorkspace -Name $workspaceName -Scope Organization )
     }
 
 
     #Use seperate post fix to add to all the exports using current date 
-    $CurrentDate = Get-Date –Format "yyyyMMdd" 
+    $CurrentDate = Get-Date -Format "yyyyMMdd" 
 
     # Build the outputpath.
     $folder = Read-Host -Prompt 'Input the folder name to save the Users(eg: C:\Out)'
     $OutPutPath = $folder + "\" + $CurrentDate
     $OutputFile = $OutPutPath + "\Users.csv" 
 
+    # Initialize the array to collect all users
+    $allUsers = @()
+
     #Now loop through the workspaces, hence the ForEach
-    ForEach ($Workspace in $Workspaces) {
-            
+    foreach ($Workspace in $Workspaces) {
         #Important Note:
         # Commenting as we only need one users file. only keep alphabets in the file / folder names. 
         # when we hit throttling limits check if file exists before to move forward with the api call.
         #End.
 
-        #$pattern = '\W'
-        #$folderName = $Workspace.name -replace $pattern
-            
-        # #For all workspaces there is a new Folder destination: Outputpath + Workspacename
-        # $Folder = $OutPutPath + "\" + $folderName 
-        # #If the folder doens't exists, it will be created.
-        # If (!(Test-Path $Folder)) {
-        #     New-Item –ItemType Directory –Force –Path $Folder
-        # }
-        #At this point, there is a folder structure with a folder for all your workspaces 
-	
         #Collect all (or one) of the reports from one or all workspaces 
-        $PBIReports = Get-PowerBIReport –WorkspaceId $Workspace.Id -Scope Organization 						 
+        $PBIReports = Get-PowerBIReport -WorkspaceId $Workspace.Id -Scope Organization 						 
 
         #Now loop through these reports: 
-        ForEach ($Report in $PBIReports) {
-            #Important Note:
-        # Commenting as we only need one users file. only keep alphabets in the file / folder names. 
-        # when we hit throttling limits check if file exists before to move forward with the api call.
-        #End.
-            #$fileName = $Report.name -replace $pattern
-            #The final collection including folder structure + file name is created.
-            #$OutputFile = $OutPutPath + "\" + $folderName + "\" + $fileName + ".csv"
+        foreach ($Report in $PBIReports) {
             
             #Your PowerShell comandline will say Downloading Workspacename Reportname
             Write-Host "Downloading "$Workspace.name":" $Report.name " Users."
@@ -215,12 +321,14 @@ function Get_ReportUsers {
             $responseUsers = Invoke-PowerBIRestMethod -Url $url -Method Get 
 
             if ($responseUsers) {
-                ForEach ($user in ($responseUsers | ConvertFrom-Json).value) {
-                    $user | Select-Object @{Name='Workspace';Expression={$Workspace.name}}, @{Name='Report';Expression={$Report.name}}, * | Export-CSV $OutputFile -NoTypeInformation -Append -Force
+                foreach ($user in ($responseUsers | ConvertFrom-Json).value) {
+                    $allUsers += $user | Select-Object @{Name = 'Workspace'; Expression = { $Workspace.name } }, @{Name = 'Report'; Expression = { $Report.name } }, *
                 }
             }
-           
         }
+    }
+    if ($allUsers.Count -gt 0) {
+        $allUsers | Export-Csv $OutputFile -NoTypeInformation -Force
     }
 }
 
@@ -245,8 +353,8 @@ function Add_WorkspacesToPremium {
         Write-Host "No capacity with the name: " $capacityName " exists. Defaulting to Shared."
         $capacityID = "00000000-0000-0000-0000-000000000000"
     }
-    else{
-    Write-Host "Found the capacity: " $capacityName " (ID: " $capacityID ")"
+    else {
+        Write-Host "Found the capacity: " $capacityName " (ID: " $capacityID ")"
     }
 
     if (Test-Path $filePath) {
@@ -262,7 +370,7 @@ function Add_WorkspacesToPremium {
                 Write-Host "Working on the Workspace ID: " $ws.Id
 
                 $wsName = (Get-PowerBIWorkspace -Scope Organization -Id $ws.Id).Name
-                Write-Host "Successully retrieved name: " $wsName
+                Write-Host "Successfully retrieved name: " $wsName
 
                 #Move the workspace to shared capacity 
                 Set-PowerBIWorkspace -Scope Organization -Id $ws.Id -CapacityId $capacityID
@@ -274,7 +382,7 @@ function Add_WorkspacesToPremium {
                 Write-Host "Working on the Workspace Name: " $ws.Name
 
                 $wsId = (Get-PowerBIWorkspace -Scope Organization -Name $ws.Name).Id
-                Write-Host "Successully retrieved Id: " $wsId
+                Write-Host "Successfully retrieved Id: " $wsId
 
                 #Move the workspace to shared capacity 
                 Set-PowerBIWorkspace -Scope Organization -Id $wsId -CapacityId $capacityID
@@ -290,17 +398,21 @@ function Add_WorkspacesToPremium {
 
 #####################################################
 #                   Main Calls                      #
-#####################################################  
+##################################################### 
 try {
-    
     #Connect to PBI Service Account
-    $userProfile = Connect-PowerBIServiceAccount –Environment Public 	
-    
+    $userProfile = Connect-PowerBIServiceAccount -Environment Public
     #add here the functions you would want to call
-    #Add_WorkspacesToPremium
+    Download_PBIXReports
 }
 catch {
     Get-ErrorInformation -incomingError $_
-    continue
+    return
+} 
+#Resolve-PowerBIError
+finally {
+    #Disconnect from Power BI Service Account
+    if ($userProfile) {
+        Disconnect-PowerBIServiceAccount -Force
+    }
 }
-Resolve-PowerBIError
