@@ -144,7 +144,7 @@ function Export-PowerBIReportWithRetry {
     $retryCount = 0
     while ($retryCount -lt $MaxRetries) {
         try {
-            Export-PowerBIReport -WorkspaceId $WorkspaceId -Id $ReportId -OutFile $OutFile
+            Export-PowerBIReport -WorkspaceId $WorkspaceId -Id $Id -OutFile $OutFile
             return
         }
         catch {
@@ -158,7 +158,7 @@ function Export-PowerBIReportWithRetry {
             }
         }
     }
-    Write-Host "Failed to export report $ReportId after $MaxRetries retries." -ForegroundColor Red
+    Write-Host "Failed to export report $Id after $MaxRetries retries." -ForegroundColor Red
 }
 
 <#
@@ -413,6 +413,6 @@ catch {
 finally {
     #Disconnect from Power BI Service Account
     if ($userProfile) {
-        Disconnect-PowerBIServiceAccount -Force
+        Disconnect-PowerBIServiceAccount
     }
 }
