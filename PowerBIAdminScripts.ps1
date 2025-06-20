@@ -3,37 +3,45 @@
 #####################################################
 #           Helper Functions to Dump Error          #
 #####################################################
+# Set the log file path
+$LogFile = Join-Path -Path (Split-Path -Parent $MyInvocation.MyCommand.Path) -ChildPath "PowerBIAdminScripts.log"
+
+# Declare userProfile as a script-scoped variable to avoid scope issues
+$script:userProfile = $null
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Color = "White"
+    )
+    # Write to console
+    Write-Host $Message -ForegroundColor $Color
+    # Write to log file (without color)
+    Add-Content -Path $LogFile -Value ("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message")
+}
+
 function Get-ErrorInformation {
     [cmdletbinding()]
     param($incomingError)
 
     if ($incomingError -and (($incomingError | Get-Member | Select-Object -ExpandProperty TypeName -Unique) -eq 'System.Management.Automation.ErrorRecord')) {
 
-        Write-Host `n"Error information:"`n
-        Write-Host `t"Exception type for catch: [$($incomingError.Exception | Get-Member | Select-Object -ExpandProperty TypeName -Unique)]"`n 
+        Write-Log "Error information:"
+        Write-Log "Exception type for catch: [$($incomingError.Exception | Get-Member | Select-Object -ExpandProperty TypeName -Unique)]"
 
         if ($incomingError.InvocationInfo.Line) {
-        
-            Write-Host `t"Command                 : [$($incomingError.InvocationInfo.Line.Trim())]"
-        
+            Write-Log "Command                 : [$($incomingError.InvocationInfo.Line.Trim())]"
         }
         else {
-
-            Write-Host `t"Unable to get command information! Multiple catch blocks can do this :("`n
-
+            Write-Log "Unable to get command information! Multiple catch blocks can do this :("
         }
 
-        Write-Host `t"Exception               : [$($incomingError.Exception.Message)]"`n
-        Write-Host `t"Target Object           : [$($incomingError.TargetObject)]"`n
-
+        Write-Log "Exception               : [$($incomingError.Exception.Message)]"
+        Write-Log "Target Object           : [$($incomingError.TargetObject)]"
     }
-
     else {
-
-        Write-Host "Please include a valid error record when using this function!" -ForegroundColor Red -BackgroundColor DarkBlue
-
+        Write-Log "Please include a valid error record when using this function!" "Red"
     }
-
 }
 #####################################################
 #           Download AuditLogs                      #
@@ -98,9 +106,13 @@ function Grant-AdminAccessToWorkspace {
     $uri = "$ApiHostUri/metadata/admin/workspaces/$WorkspaceId/adminAccess"
 
     # Make PUT request
-    Invoke-RestMethod -Uri $uri -Headers $headers -Method Put
-
-    Write-Host "Admin access granted to workspace ID $WorkspaceId"
+    try {
+        Invoke-RestMethod -Uri $uri -Headers $headers -Method Put
+        Write-Log "[INFO] Admin access granted to workspace ID $WorkspaceId" "Green"
+    }
+    catch {
+        Write-Log "[WARN] Admin access cant be granted to workspace ID $WorkspaceId. (mostly because you already have access)" "Yellow"
+    }
 }
 
 function Get-PowerBIReportWithRetry {
@@ -108,17 +120,20 @@ function Get-PowerBIReportWithRetry {
         [Parameter(Mandatory = $true)]
         [string]$WorkspaceId,
         [int]$MaxRetries = 30,
-        [int]$RetryDelaySeconds = 3600
+        [int]$RetryDelaySeconds = 05
     )
     $retryCount = 0
+    # Start with a delay
+    Start-Sleep -Seconds $RetryDelaySeconds
+
     while ($retryCount -lt $MaxRetries) {
         try {
             return Get-PowerBIReport -WorkspaceId $WorkspaceId -Scope Organization
         }
         catch {
             if ($_.Exception.Response.StatusCode.value__ -eq 429) {
-                Write-Host "Received HTTP 429 (Too Many Requests). Sleeping for 1 hour before retrying..." -ForegroundColor Yellow
-                Start-Sleep -Seconds $RetryDelaySeconds
+                Write-Log "[WARN] Received HTTP 429 (Too Many Requests). Sleeping for 1 hour before retrying..." "Yellow"
+                Start-Sleep -Seconds ($RetryDelaySeconds * 60)
                 $retryCount++
             }
             else {
@@ -126,7 +141,7 @@ function Get-PowerBIReportWithRetry {
             }
         }
     }
-    Write-Host "Failed to retrieve reports for workspace $WorkspaceId after $MaxRetries retries." -ForegroundColor Red
+    Write-Log "[ERRO] Failed to retrieve reports for workspace $WorkspaceId after $MaxRetries retries." "Red"
     return $null
 }
 
@@ -139,9 +154,12 @@ function Export-PowerBIReportWithRetry {
         [Parameter(Mandatory = $true)]
         [string]$OutFile,
         [int]$MaxRetries = 30,
-        [int]$RetryDelaySeconds = 3600
+        [int]$RetryDelaySeconds = 05
     )
     $retryCount = 0
+    # Start with a delay
+    Start-Sleep -Seconds $RetryDelaySeconds
+
     while ($retryCount -lt $MaxRetries) {
         try {
             Export-PowerBIReport -WorkspaceId $WorkspaceId -Id $Id -OutFile $OutFile
@@ -149,16 +167,17 @@ function Export-PowerBIReportWithRetry {
         }
         catch {
             if ($_.Exception.Response.StatusCode.value__ -eq 429) {
-                Write-Host "Received HTTP 429 (Too Many Requests) during export. Sleeping for 1 hour before retrying..." -ForegroundColor Yellow
-                Start-Sleep -Seconds $RetryDelaySeconds
+                Write-Log "[WARN] Received HTTP 429 (Too Many Requests) during export. Sleeping for 1 hour before retrying..." "Yellow"
+                Start-Sleep -Seconds ($RetryDelaySeconds * 60)
                 $retryCount++
             }
             else {
+                Write-Log "[ERRO] Failed to export report: $OutFile." "Red"
                 throw $_
             }
         }
     }
-    Write-Host "Failed to export report $Id after $MaxRetries retries." -ForegroundColor Red
+    Write-Log "[ERRO] Failed to export report $Id after $MaxRetries retries: $OutFile." "Red"
 }
 
 <#
@@ -180,7 +199,7 @@ function Download_PBIXReports {
     
     # Validate the userProfile
     if (-not $userProfile) {
-        Write-Host "You are not connected to Power BI Service. Connecting now." -ForegroundColor Yellow
+        Write-Log "[WARN] You are not connected to Power BI Service. Connecting now." "Yellow"
         $userProfile = Connect-PowerBIServiceAccount -Environment Public
     }
        
@@ -234,13 +253,14 @@ function Download_PBIXReports {
         $downloaded = $false
         #Collect all (or one) of the reports from one or all workspaces 
         $PBIReports = Get-PowerBIReportWithRetry -WorkspaceId $Workspace.Id
+        
 
         #Now loop through these reports: 
         foreach ($Report in $PBIReports) {
             $fileName = $Report.name -replace $pattern
 
             #Your PowerShell comandline will say Downloading Workspacename Reportname
-            Write-Host "Downloading "$Workspace.name":" $Report.name "to " $folderName":"$fileName
+            Write-Log "[INFO] Downloading $($Workspace.name): $($Report.name) to ${folderName}: ${fileName}"
 			
             #The final collection including folder structure + file name is created.
             $OutputFile = $OutPutPath + "\" + $folderName + "\" + $fileName + ".pbix"
@@ -254,11 +274,11 @@ function Download_PBIXReports {
             Export-PowerBIReportWithRetry -WorkspaceId $Workspace.Id -Id $Report.Id -OutFile $OutputFile
 
             if (Test-Path $OutputFile) {
-                Write-Host "Successfully downloaded." -ForegroundColor Green
+                Write-Log "[INFO] Successfully downloaded." "Green"
                 $downloaded = $true
             }
             else {
-                Write-Host "Failed to download the report: " $Report.name " from workspace: " $Workspace.name -ForegroundColor Red
+                Write-Log "[ERRO] Failed to download the report: $($Report.name) from workspace: $($Workspace.name)" "Red"
             }
         }
         
@@ -315,7 +335,7 @@ function Get_ReportUsers {
         foreach ($Report in $PBIReports) {
             
             #Your PowerShell comandline will say Downloading Workspacename Reportname
-            Write-Host "Downloading "$Workspace.name":" $Report.name " Users."
+            Write-Log "[INFO] Downloading $($Workspace.name): $($Report.name) Users."
             
             $url = "/admin/reports/" + $Report.ID + "/users"            
             $responseUsers = Invoke-PowerBIRestMethod -Url $url -Method Get 
@@ -350,11 +370,11 @@ function Add_WorkspacesToPremium {
 
     $capacityID = (Get-PowerBICapacity -Scope Organization | Where-Object { $_.DisplayName -eq $capacityName }).Id
     if ([string]::IsNullOrWhitespace($capacityID)) {
-        Write-Host "No capacity with the name: " $capacityName " exists. Defaulting to Shared."
+        Write-Log "[WARN] No capacity with the name: $capacityName exists. Defaulting to Shared." "Yellow"
         $capacityID = "00000000-0000-0000-0000-000000000000"
     }
     else {
-        Write-Host "Found the capacity: " $capacityName " (ID: " $capacityID ")"
+        Write-Log "[INFO] Found the capacity: $capacityName (ID: $capacityID)" "Green"
     }
 
     if (Test-Path $filePath) {
@@ -367,10 +387,10 @@ function Add_WorkspacesToPremium {
 
         if ( $idHeader -in $headers ) {
             foreach ($ws in $wsInfo) {
-                Write-Host "Working on the Workspace ID: " $ws.Id
+                Write-Log "[INFO] Working on the Workspace ID: $($ws.Id)" "Green"
 
                 $wsName = (Get-PowerBIWorkspace -Scope Organization -Id $ws.Id).Name
-                Write-Host "Successfully retrieved name: " $wsName
+                Write-Log "[INFO] Successfully retrieved name: $wsName" "Green"
 
                 #Move the workspace to shared capacity 
                 Set-PowerBIWorkspace -Scope Organization -Id $ws.Id -CapacityId $capacityID
@@ -379,10 +399,10 @@ function Add_WorkspacesToPremium {
         }
         elseif ($nameHeader -in $headers) {
             foreach ($ws in $wsInfo) {
-                Write-Host "Working on the Workspace Name: " $ws.Name
+                Write-Log "[INFO] Working on the Workspace Name: $($ws.Name)" "Green"
 
                 $wsId = (Get-PowerBIWorkspace -Scope Organization -Name $ws.Name).Id
-                Write-Host "Successfully retrieved Id: " $wsId
+                Write-Log "[INFO] Successfully retrieved Id: $wsId" "Green"
 
                 #Move the workspace to shared capacity 
                 Set-PowerBIWorkspace -Scope Organization -Id $wsId -CapacityId $capacityID
@@ -391,7 +411,7 @@ function Add_WorkspacesToPremium {
 
     }
     else {
-        Write-Host "Invalid File Path."
+        Write-Log "[ERRO] Invalid File Path." "Red"
     }
 }
 
