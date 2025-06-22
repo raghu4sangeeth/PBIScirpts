@@ -316,6 +316,10 @@ function Get_ReportUsers {
     # Build the outputpath.
     $folder = Read-Host -Prompt 'Input the folder name to save the Users(eg: C:\Out)'
     $OutPutPath = $folder + "\" + $CurrentDate
+    #If the folder doens't exists, it will be created.
+    if (!(Test-Path $OutPutPath)) {
+        New-Item -ItemType Directory -Force -Path $OutPutPath
+    }
     $OutputFile = $OutPutPath + "\Users.csv" 
 
     # Initialize the array to collect all users
@@ -423,7 +427,7 @@ try {
     #Connect to PBI Service Account
     $userProfile = Connect-PowerBIServiceAccount -Environment Public
     #add here the functions you would want to call
-    Download_PBIXReports
+    Get_ReportUsers
 }
 catch {
     Get-ErrorInformation -incomingError $_
